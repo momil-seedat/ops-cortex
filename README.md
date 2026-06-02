@@ -46,8 +46,6 @@ OpsCortex is a research project that builds a **multi-agent, LLM-assisted operat
 ### Step 1 — Configure environment
 
 ```bash
-cd service-brain
-cp .env.example .env
 # Edit .env and add your API key:
 nano .env
 ```
@@ -1135,7 +1133,7 @@ OLLAMA_BASE_URL=http://host.docker.internal:11434
 ## Project Structure
 
 ```
-service-brain/
+
 ├── agents/
 │   ├── monitoring_agent.py    # Prometheus poller — discovers any service label
 │   ├── topology_agent.py      # Graph sync, lifecycle tracking, Neo4j snapshot
