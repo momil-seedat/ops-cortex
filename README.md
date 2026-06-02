@@ -60,7 +60,6 @@ ANTHROPIC_API_KEY=sk-ant-...
 ### Step 2 — Start the full stack
 
 ```bash
-cd service-brain
 docker compose up --build -d
 ```
 
