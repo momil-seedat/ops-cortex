@@ -4,6 +4,7 @@ OpsCortex is a research project that builds a **multi-agent, LLM-assisted operat
 
 ---
 Research paper https://arxiv.org/pdf/2606.20758
+Medium Article https://medium.com/@momilseedat32/how-i-built-an-agentic-ai-monitoring-platform-for-automated-root-cause-analysis-640cb20d4056
 ## Table of Contents
 
 1. [How to Run](#1-how-to-run)
