@@ -3,7 +3,9 @@
 OpsCortex is a research project that builds a **multi-agent, LLM-assisted operations intelligence system** for microservice environments. Three specialized agents continuously observe a simulated e-commerce backend, detect anomalies, trace cascade failures, and produce root-cause diagnoses — all without human intervention.
 
 ---
+## Research Paper
 Research paper https://arxiv.org/pdf/2606.20758
+## Medium Article
 Medium Article https://medium.com/@momilseedat32/how-i-built-an-agentic-ai-monitoring-platform-for-automated-root-cause-analysis-640cb20d4056
 ## Table of Contents
 
