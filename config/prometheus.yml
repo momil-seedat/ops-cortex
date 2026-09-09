@@ -1,0 +1,41 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: order_service
+    static_configs:
+      - targets: ["order-service:8001"]
+    metrics_path: /metrics
+    relabel_configs:
+      - target_label: service
+        replacement: order_service
+
+  - job_name: payment_service
+    static_configs:
+      - targets: ["payment-service:8002"]
+    metrics_path: /metrics
+    relabel_configs:
+      - target_label: service
+        replacement: payment_service
+
+  - job_name: inventory_service
+    static_configs:
+      - targets: ["inventory-service:8003"]
+    metrics_path: /metrics
+    relabel_configs:
+      - target_label: service
+        replacement: inventory_service
+
+  - job_name: report_service
+    static_configs:
+      - targets: ["report-service:8004"]
+    metrics_path: /metrics
+    relabel_configs:
+      - target_label: service
+        replacement: report_service
+
+  - job_name: otel_collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+    metrics_path: /metrics

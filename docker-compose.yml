@@ -1,0 +1,474 @@
+networks:
+  brain-net:
+    driver: bridge
+
+volumes:
+  redis-data:
+  neo4j-data:
+  prometheus-data:
+  sqlite-data:
+  ml-models:
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - brain-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5
+    container_name: neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/password123
+      NEO4J_PLUGINS: '["graph-data-science"]'
+    volumes:
+      - neo4j-data:/data
+    networks:
+      - brain-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - brain-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics exposed by collector
+      - "8889:8889"   # Prometheus exporter port
+      - "13133:13133" # health_check extension
+    volumes:
+      - ./config/otel-collector.yml:/etc/otel/config.yaml:ro
+    command: ["--config=/etc/otel/config.yaml"]
+    networks:
+      - brain-net
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ── Application Services ────────────────────────────────────────────────────
+
+  order-service:
+    build:
+      context: .
+      dockerfile: services/order_service/Dockerfile
+    container_name: order-service
+    ports:
+      - "8001:8001"
+    environment:
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SQLITE_DB_PATH: /data/service_brain.db
+      OTEL_SERVICE_NAME: order_service
+    volumes:
+      - sqlite-data:/data
+    networks:
+      - brain-net
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/health | grep -q service || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment_service/Dockerfile
+    container_name: payment-service
+    ports:
+      - "8002:8002"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SQLITE_DB_PATH: /data/service_brain.db
+      OTEL_SERVICE_NAME: payment_service
+    volumes:
+      - sqlite-data:/data
+    networks:
+      - brain-net
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8002/health | grep -q service || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: services/inventory_service/Dockerfile
+    container_name: inventory-service
+    ports:
+      - "8003:8003"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SQLITE_DB_PATH: /data/service_brain.db
+      OTEL_SERVICE_NAME: inventory_service
+      KAFKA_TOPIC_INVENTORY: inventory-events
+    volumes:
+      - sqlite-data:/data
+    networks:
+      - brain-net
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8003/health | grep -q service || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  report-service:
+    build:
+      context: .
+      dockerfile: services/report_service/Dockerfile
+    container_name: report-service
+    ports:
+      - "8004:8004"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: report_service
+      # Hour of day (0-23) at which the daily batch job fires automatically
+      REPORT_RUN_HOUR: "2"
+      # Duration of each batch run in minutes
+      REPORT_DURATION_MINUTES: "5"
+      # Records processed per batch run
+      RECORDS_PER_BATCH: "1000"
+    networks:
+      - brain-net
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8004/health | grep -q service || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Agents ──────────────────────────────────────────────────────────────────
+
+  monitoring-agent:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+    container_name: monitoring-agent
+    command: ["python", "-m", "agents.monitoring_agent"]
+    environment:
+      MONITORING_MODE: server
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      PROMETHEUS_URL: http://prometheus:9090
+      OTEL_COLLECTOR_URL: http://otel-collector:4318
+      ORDER_SERVICE_URL: http://order-service:8001
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+      REPORT_SERVICE_URL: http://report-service:8004
+      SQLITE_DB_PATH: /data/service_brain.db
+      ALERT_STREAM_CONSUMER_GROUP: diagnosis-agents
+    ports:
+      - "8080:8080"   # Alertmanager webhook
+    volumes:
+      - sqlite-data:/data
+    networks:
+      - brain-net
+    depends_on:
+      redis:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+
+  topology-agent:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+    container_name: topology-agent
+    command: ["python", "-m", "agents.topology_agent"]
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      OTEL_COLLECTOR_URL: http://otel-collector:4318
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password123
+      SQLITE_DB_PATH: /data/service_brain.db
+      ML_SAVED_MODELS_DIR: /data/ml_models
+    volumes:
+      - sqlite-data:/data
+      - ml-models:/data/ml_models
+    networks:
+      - brain-net
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+  diagnosis-agent:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+    container_name: diagnosis-agent
+    command: ["python", "-m", "agents.diagnosis_agent"]
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SQLITE_DB_PATH: /data/service_brain.db
+      ML_SAVED_MODELS_DIR: /data/ml_models
+      ALERT_STREAM_CONSUMER_GROUP: diagnosis-agents
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password123
+      LLM_PROVIDER: ${LLM_PROVIDER:-claude}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - sqlite-data:/data
+      - ml-models:/data/ml_models
+    networks:
+      - brain-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  model-trainer:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+    container_name: model-trainer
+    command: ["python", "-m", "ml.model_trainer"]
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SQLITE_DB_PATH: /data/service_brain.db
+      ML_SAVED_MODELS_DIR: /data/ml_models
+    volumes:
+      - sqlite-data:/data
+      - ml-models:/data/ml_models
+    networks:
+      - brain-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Dashboard ────────────────────────────────────────────────────────────────
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password123
+      SQLITE_DB_PATH: /data/service_brain.db
+      PROMETHEUS_URL: http://prometheus:9090
+      ORDER_SERVICE_URL: http://order-service:8001
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+    volumes:
+      - sqlite-data:/data
+    networks:
+      - brain-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Scenario runners (profiles — run on demand) ──────────────────────────────
+
+  scenario-01:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: scenario-01
+    command: ["python", "-m", "scenarios.scenario_01_request_surge"]
+    profiles: ["scenarios"]
+    environment:
+      ORDER_SERVICE_URL: http://order-service:8001
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+    networks:
+      - brain-net
+    depends_on:
+      order-service:
+        condition: service_healthy
+
+  scenario-02:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: scenario-02
+    command: ["python", "-m", "scenarios.scenario_02_kafka_lag"]
+    profiles: ["scenarios"]
+    environment:
+      ORDER_SERVICE_URL: http://order-service:8001
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+    networks:
+      - brain-net
+    depends_on:
+      order-service:
+        condition: service_healthy
+
+  scenario-03:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: scenario-03
+    command: ["python", "-m", "scenarios.scenario_03_cascade_failure"]
+    profiles: ["scenarios"]
+    environment:
+      ORDER_SERVICE_URL: http://order-service:8001
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+    networks:
+      - brain-net
+    depends_on:
+      order-service:
+        condition: service_healthy
+
+  scenario-05:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: scenario-05
+    command: ["python", "-m", "scenarios.scenario_05_internal_bottleneck"]
+    profiles: ["scenarios"]
+    environment:
+      ORDER_SERVICE_URL: http://order-service:8001
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+    networks:
+      - brain-net
+    depends_on:
+      order-service:
+        condition: service_healthy
+
+  scenario-06:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: scenario-06
+    command: ["python", "-m", "scenarios.scenario_06_new_service_registration"]
+    profiles: ["scenarios"]
+    environment:
+      REPORT_SERVICE_URL: http://report-service:8004
+      ORDER_SERVICE_URL: http://order-service:8001
+      REDIS_HOST: redis
+    networks:
+      - brain-net
+    depends_on:
+      report-service:
+        condition: service_healthy
+
+  scenario-07:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: scenario-07
+    command: ["python", "-m", "scenarios.scenario_07_batch_suppression_learning"]
+    profiles: ["scenarios"]
+    environment:
+      REPORT_SERVICE_URL: http://report-service:8004
+      REDIS_HOST: redis
+      SQLITE_DB_PATH: /data/service_brain.db
+    volumes:
+      - sqlite-data:/data
+    networks:
+      - brain-net
+    depends_on:
+      report-service:
+        condition: service_healthy
+
+  scenario-08:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: scenario-08
+    command: ["python", "-m", "scenarios.scenario_08_batch_degradation_detection"]
+    profiles: ["scenarios"]
+    environment:
+      REPORT_SERVICE_URL: http://report-service:8004
+      REDIS_HOST: redis
+      SQLITE_DB_PATH: /data/service_brain.db
+    volumes:
+      - sqlite-data:/data
+    networks:
+      - brain-net
+    depends_on:
+      report-service:
+        condition: service_healthy
+
+  reset-for-testing:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    container_name: reset-for-testing
+    command: ["python", "-m", "scenarios.reset_for_testing"]
+    profiles: ["scenarios"]
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SQLITE_DB_PATH: /data/service_brain.db
+      ML_SAVED_MODELS_DIR: /data/ml_models
+    volumes:
+      - sqlite-data:/data
+      - ml-models:/data/ml_models
+    networks:
+      - brain-net
+    depends_on:
+      redis:
+        condition: service_healthy
